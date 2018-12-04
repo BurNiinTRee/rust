@@ -153,8 +153,14 @@ impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
             };
             mem::drop(lock);
 
-            if let Err(cycle) = job.await(tcx, span) {
-                return TryGetJob::JobCompleted(Err(cycle));
+            #[cfg(not(parallel_queries))]
+            return job.await(tcx, span);
+
+            #[cfg(parallel_queries)]
+            {
+                if let Err(cycle) = job.await(tcx, span) {
+                    return TryGetJob::JobCompleted(Err(cycle));
+                }
             }
         }
     }
@@ -245,8 +251,10 @@ pub(super) enum TryGetJob<'a, 'tcx: 'a, D: QueryDescription<'tcx> + 'a> {
 }
 
 impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
+    #[inline(never)]
+    #[cold]
     pub(super) fn report_cycle(self, CycleError { usage, cycle: stack }: CycleError<'gcx>)
-        -> DiagnosticBuilder<'a>
+        -> Box<DiagnosticBuilder<'a>>
     {
         assert!(!stack.is_empty());
 
@@ -280,7 +288,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                               &format!("cycle used when {}", query.describe(self)));
             }
 
-            return err
+            return Box::new(err)
         })
     }
 
@@ -345,6 +353,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         }
     }
 
+    #[inline(never)]
     fn try_get_with<Q: QueryDescription<'gcx>>(
         self,
         span: Span,
@@ -409,7 +418,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             return Ok(result);
         }
 
-        if !dep_node.kind.is_input() {
+        if !dep_node.kind.is_input_inlined() {
             if let Some(dep_node_index) = self.try_mark_green_and_read(&dep_node) {
                 profq_msg!(self, ProfileQueriesMsg::CacheHit);
                 self.sess.profiler(|p| p.record_query_hit(Q::CATEGORY));
@@ -585,7 +594,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 
         // Ensuring an "input" or anonymous query makes no sense
         assert!(!dep_node.kind.is_anon());
-        assert!(!dep_node.kind.is_input());
+        assert!(!dep_node.kind.is_input_inlined());
         if self.try_mark_green_and_read(&dep_node).is_none() {
             // A None return from `try_mark_green_and_read` means that this is either
             // a new dep node or that the dep node has already been marked red.
@@ -625,7 +634,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         self,
         span: Span,
         key: Q::Key,
-    ) -> Result<Q::Value, DiagnosticBuilder<'a>> {
+    ) -> Result<Q::Value, Box<DiagnosticBuilder<'a>>> {
         match self.try_get_with::<Q>(span, key) {
             Ok(e) => Ok(e),
             Err(e) => Err(self.report_cycle(e)),
@@ -637,10 +646,19 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         span: Span,
         key: Q::Key,
     ) -> Q::Value {
-        self.try_get_query::<Q>(span, key).unwrap_or_else(|mut e| {
-            e.emit();
-            Q::handle_cycle_error(self)
+        self.try_get_query::<Q>(span, key).unwrap_or_else(|e| {
+            self.emit_error::<Q>(e)
         })
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn emit_error<Q: QueryDescription<'gcx>>(
+        self,
+        mut e: Box<DiagnosticBuilder<'a>>,
+    ) -> Q::Value {
+        e.emit();
+        Q::handle_cycle_error(self)
     }
 }
 
@@ -861,6 +879,7 @@ macro_rules! define_queries_inner {
 
         impl<'a, 'gcx, 'tcx> Deref for TyCtxtAt<'a, 'gcx, 'tcx> {
             type Target = TyCtxt<'a, 'gcx, 'tcx>;
+            #[inline(always)]
             fn deref(&self) -> &Self::Target {
                 &self.tcx
             }
@@ -869,6 +888,7 @@ macro_rules! define_queries_inner {
         impl<'a, $tcx, 'lcx> TyCtxt<'a, $tcx, 'lcx> {
             /// Return a transparent wrapper for `TyCtxt` which uses
             /// `span` as the location of queries performed through it.
+            #[inline(always)]
             pub fn at(self, span: Span) -> TyCtxtAt<'a, $tcx, 'lcx> {
                 TyCtxtAt {
                     tcx: self,
@@ -877,6 +897,7 @@ macro_rules! define_queries_inner {
             }
 
             $($(#[$attr])*
+            #[inline(always)]
             pub fn $name(self, key: $K) -> $V {
                 self.at(DUMMY_SP).$name(key)
             })*
@@ -884,6 +905,7 @@ macro_rules! define_queries_inner {
 
         impl<'a, $tcx, 'lcx> TyCtxtAt<'a, $tcx, 'lcx> {
             $($(#[$attr])*
+            #[inline(always)]
             pub fn $name(self, key: $K) -> $V {
                 self.tcx.get_query::<queries::$name<'_>>(self.span, key)
             })*

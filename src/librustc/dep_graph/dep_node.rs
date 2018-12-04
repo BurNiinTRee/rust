@@ -162,7 +162,9 @@ macro_rules! define_dep_nodes {
                 }
             }
 
-            #[inline]
+            // FIXME: Make `is_anon`, `is_input`, `is_eval_always` and `has_params` properties
+            // of queries
+            #[inline(always)]
             pub fn is_anon(&self) -> bool {
                 match *self {
                     $(
@@ -171,8 +173,8 @@ macro_rules! define_dep_nodes {
                 }
             }
 
-            #[inline]
-            pub fn is_input(&self) -> bool {
+            #[inline(always)]
+            pub fn is_input_inlined(&self) -> bool {
                 match *self {
                     $(
                         DepKind :: $variant => { contains_input_attr!($($attr),*) }
@@ -180,7 +182,11 @@ macro_rules! define_dep_nodes {
                 }
             }
 
-            #[inline]
+            pub fn is_input(&self) -> bool {
+                self.is_input_inlined()
+            }
+
+            #[inline(always)]
             pub fn is_eval_always(&self) -> bool {
                 match *self {
                     $(
